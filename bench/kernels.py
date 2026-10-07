@@ -39,11 +39,16 @@ def main(sizes=(1, 8, 32, 128, 512, 2048, 4096), E=64, k=8, H=2048, I=1024):
         ref = lambda: moe.experts_reference(h, idx, w, gu, dn)
         grp = lambda: moe.experts_grouped(h, idx, w, gu, dn)
         ours = lambda: kernels.moe_layer(h, router, gu, dn, k, False)
-        rec = {"tokens": N, "loop_ms": timed(ref), "sorted_loop_ms": timed(grp), "switchyard_ms": timed(ours)}
+        gemv = lambda: kernels.moe_layer(h, router, gu, dn, k, False, "gemv")
+        gemm = lambda: kernels.moe_layer(h, router, gu, dn, k, False, "gemm")
+        rec = {"tokens": N, "loop_ms": timed(ref), "sorted_loop_ms": timed(grp), "switchyard_ms": timed(ours),
+               "gemv_ms": timed(gemv), "gemm_ms": timed(gemm)}
         want = moe.experts_reference(h.float(), idx, w.float(), gu.float(), dn.float())
         rec["max_err_switchyard"] = (ours().float() - want).abs().max().item()
         rec["max_err_fp16_loop"] = (ref().float() - want).abs().max().item()
         rec["speedup_vs_loop"] = rec["loop_ms"] / rec["switchyard_ms"]
+        rec["speedup_vs_sorted_loop"] = rec["sorted_loop_ms"] / rec["switchyard_ms"]
+        rec["max_rows_per_expert"] = int(torch.bincount(idx.flatten(), minlength=E).max())
         # Bytes of expert weights touched (each used expert read once) over the kernel time.
         used = int((torch.bincount(idx.flatten(), minlength=E) > 0).sum())
         rec["experts_used"] = used

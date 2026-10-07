@@ -32,21 +32,33 @@ def route(h, router, top_k, norm_topk_prob):
     return ext().route(F.linear(h, router).contiguous(), top_k, norm_topk_prob)
 
 
-def experts(h, idx, w, gate_up, down):
+# Below this many rows per expert the layer streams weights (decode): use the GEMV kernel.
+GEMV_MAX_ROWS = 8
+
+
+def experts(h, idx, w, gate_up, down, mode="auto"):
     """The experts of one MoE layer on this GPU, for routing (idx, w) computed already:
-    sort by expert, grouped SwiGLU GEMM reading rows of h in place, grouped down GEMM scaled
-    by the router weights, combine. idx int32 [N, k] in 0..E-1 local expert ids."""
+    sort by expert, SwiGLU projection reading rows of h in place, down projection scaled by
+    the router weights, combine. idx int32 [N, k] in 0..E-1 local expert ids.
+    mode: "gemv" (streams weights; for few rows per expert), "gemm" (tensor-core tiles),
+    or "auto" (gemv when no expert has more than GEMV_MAX_ROWS rows)."""
     E = ext()
     N = h.shape[0]
     counts, offsets, token, wsorted, pos_of = E.sort_by_expert(idx.contiguous(), w.contiguous(), gate_up.shape[0])
-    toff = tile_offsets(counts)
-    total = int(toff[-1])
     rows = idx.numel()
-    act = E.grouped_gemm(h.contiguous(), token, gate_up, offsets, toff, total, rows, True, None)
-    y = E.grouped_gemm(act, None, down, offsets, toff, total, rows, False, wsorted)
+    if mode == "auto":
+        mode = "gemv" if int(counts.max()) <= GEMV_MAX_ROWS else "gemm"
+    if mode == "gemv":
+        act = E.grouped_gemv(h.contiguous(), token, gate_up, offsets, rows, True, None)
+        y = E.grouped_gemv(act, None, down, offsets, rows, False, wsorted)
+    else:
+        toff = tile_offsets(counts)
+        total = int(toff[-1])
+        act = E.grouped_gemm(h.contiguous(), token, gate_up, offsets, toff, total, rows, True, None)
+        y = E.grouped_gemm(act, None, down, offsets, toff, total, rows, False, wsorted)
     return E.combine(y, pos_of, idx.contiguous(), N)
 
 
-def moe_layer(h, router, gate_up, down, top_k, norm_topk_prob):
+def moe_layer(h, router, gate_up, down, top_k, norm_topk_prob, mode="auto"):
     idx, w = route(h, router, top_k, norm_topk_prob)
-    return experts(h, idx, w, gate_up, down)
+    return experts(h, idx, w, gate_up, down, mode)

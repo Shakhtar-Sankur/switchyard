@@ -26,19 +26,28 @@ def test_route_matches_softmax_topk(E, k):
     for norm in (False, True):
         idx, w = kernels.route(h, router, k, norm)
         ridx, rw = moe.route(h, router, k, norm)
-        assert torch.equal(idx.long(), ridx)
-        assert (w.float() - rw.float()).abs().max().item() < 1e-3
+        # The same experts, except where two candidates for the last places are tied to
+        # within float rounding (the kernel's softmax sums in a different order).
+        probs = torch.softmax(torch.nn.functional.linear(h, router).float(), -1)
+        same = (idx.long().sort(-1).values == ridx.sort(-1).values).all(-1)
+        for t in torch.nonzero(~same).flatten().tolist():
+            mine, ref = set(idx[t].tolist()), set(ridx[t].tolist())
+            gap = (probs[t, list(mine - ref)].sum() - probs[t, list(ref - mine)].sum()).abs().item()
+            assert gap < 1e-6, (t, mine ^ ref, gap)
+        assert same.float().mean().item() > 0.99
+        assert (w.float().sort(-1).values - rw.float().sort(-1).values)[same].abs().max().item() < 1e-3
 
 
 @cuda
 @pytest.mark.parametrize("N", [1, 7, 64, 333, 2048])
 @pytest.mark.parametrize("skew", [0.0, 2.0])
-def test_moe_layer_matches_the_reference(N, skew):
+@pytest.mark.parametrize("mode", ["gemv", "gemm"])
+def test_moe_layer_matches_the_reference(N, skew, mode):
     from switchyard import kernels
     h, router, gu, dn = setup(N, skew=skew)
     ridx, rw = moe.route(h, router, 8, False)
     want = moe.experts_reference(h.float(), ridx, rw.float(), gu.float(), dn.float())  # fp32 reference
-    got = kernels.moe_layer(h, router, gu, dn, 8, False).float()
+    got = kernels.experts(h, ridx.int(), rw, gu, dn, mode).float()
     half = moe.experts_reference(h, ridx, rw, gu, dn).float()                         # fp16, as transformers runs it
     err, err_half = (got - want).abs().max().item(), (half - want).abs().max().item()
     assert err <= max(2 * err_half, 2e-3), (err, err_half)

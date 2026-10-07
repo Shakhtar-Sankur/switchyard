@@ -36,7 +36,7 @@ __global__ void route_kernel(const __half* __restrict__ logits, int N, int E, in
   float sum = 0.f;
   for (int j = 0; j < PER_LANE; ++j) {
     int e = lane + 32 * j;
-    v[j] = e < E ? __expf(v[j] - mx) : 0.f;
+    v[j] = e < E ? expf(v[j] - mx) : 0.f;
     sum += v[j];
   }
   for (int o = 16; o; o >>= 1) sum += __shfl_xor_sync(0xffffffff, sum, o);
@@ -171,7 +171,8 @@ __global__ void __launch_bounds__(128) grouped_gemm_kernel(
   __half* As = reinterpret_cast<__half*>(smem);                 // [BM][BK+PAD]
   __half* Bs = As + BM * (BK + PAD);                            // [BN][BK+PAD]
   __half* Bu = Bs + BN * (BK + PAD);                            // [BN][BK+PAD] (SWIGLU)
-  float* Cs = reinterpret_cast<float*>(Bu + (SWIGLU ? BN * (BK + PAD) : 0));  // [BM][BN]
+  // After the K loop the operand tiles are dead: the fp32 epilogue reuses the same memory.
+  float* Cs = reinterpret_cast<float*>(smem);                   // [BM][BN]
   float* Cu = Cs + BM * BN;                                     // [BM][BN] (SWIGLU)
 
   // Which expert does this row tile belong to? (binary search over tile_offsets)
@@ -194,27 +195,34 @@ __global__ void __launch_bounds__(128) grouped_gemm_kernel(
       if (SWIGLU) wmma::fill_fragment(accu[i][j], 0.f);
     }
 
-  for (int k0 = 0; k0 < K; k0 += BK) {
-    // 64 rows x 32 halves = 256 chunks of 8 halves (16 B); 128 threads load 2 each.
-    for (int c = threadIdx.x; c < BM * BK / 8; c += 128) {
-      int r = c / (BK / 8), kk = (c % (BK / 8)) * 8;
-      int row = row0 + r;
-      uint4 v = make_uint4(0, 0, 0, 0);
+  // Each thread moves two 16-byte chunks of each operand per K tile (64 rows x 32 halves).
+  // The next tile's chunks are loaded into registers while the current tile is multiplied.
+  uint4 ra[2], rb[2], ru[2];
+  auto fetch = [&](int k0) {
+    for (int q = 0; q < 2; ++q) {
+      int c = threadIdx.x + 128 * q, r = c / (BK / 8), kk = (c % (BK / 8)) * 8;
+      int row = row0 + r, n = n0 + r;
+      ra[q] = rb[q] = ru[q] = make_uint4(0, 0, 0, 0);
       if (row < row_end) {
         int src = a_rows ? a_rows[row] : row;
-        v = *reinterpret_cast<const uint4*>(A + (size_t)src * K + k0 + kk);
+        ra[q] = *reinterpret_cast<const uint4*>(A + (size_t)src * K + k0 + kk);
       }
-      *reinterpret_cast<uint4*>(As + r * (BK + PAD) + kk) = v;
-      int n = n0 + r;  // B rows (output columns) for this tile
-      uint4 b = make_uint4(0, 0, 0, 0), u = make_uint4(0, 0, 0, 0);
       if (n < Nout) {
-        b = *reinterpret_cast<const uint4*>(Be + (size_t)n * K + k0 + kk);
-        if (SWIGLU) u = *reinterpret_cast<const uint4*>(Be + (size_t)(Nout + n) * K + k0 + kk);
+        rb[q] = *reinterpret_cast<const uint4*>(Be + (size_t)n * K + k0 + kk);
+        if (SWIGLU) ru[q] = *reinterpret_cast<const uint4*>(Be + (size_t)(Nout + n) * K + k0 + kk);
       }
-      *reinterpret_cast<uint4*>(Bs + r * (BK + PAD) + kk) = b;
-      if (SWIGLU) *reinterpret_cast<uint4*>(Bu + r * (BK + PAD) + kk) = u;
+    }
+  };
+  fetch(0);
+  for (int k0 = 0; k0 < K; k0 += BK) {
+    for (int q = 0; q < 2; ++q) {
+      int c = threadIdx.x + 128 * q, r = c / (BK / 8), kk = (c % (BK / 8)) * 8;
+      *reinterpret_cast<uint4*>(As + r * (BK + PAD) + kk) = ra[q];
+      *reinterpret_cast<uint4*>(Bs + r * (BK + PAD) + kk) = rb[q];
+      if (SWIGLU) *reinterpret_cast<uint4*>(Bu + r * (BK + PAD) + kk) = ru[q];
     }
     __syncthreads();
+    if (k0 + BK < K) fetch(k0 + BK);
     for (int kk = 0; kk < BK; kk += 16) {
       wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a[2];
       wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b[2];
@@ -243,7 +251,7 @@ __global__ void __launch_bounds__(128) grouped_gemm_kernel(
     if (SWIGLU) {
       // silu in fp32, rounded to fp16 like the reference's two separate fp16 ops
       float g = __half2float(__float2half(v)), up = __half2float(__float2half(Cu[c]));
-      v = __half2float(__float2half(g / (1.f + __expf(-g)))) * up;
+      v = __half2float(__float2half(g / (1.f + expf(-g)))) * up;
     }
     if (SCALE) v = __half2float(__float2half(v)) * __half2float(scale[row]);
     C[(size_t)row * Nout + col] = __float2half(v);
@@ -262,7 +270,9 @@ torch::Tensor grouped_gemm(torch::Tensor A, c10::optional<torch::Tensor> a_rows,
   auto C = torch::empty({rows, Nout}, A.options());
   if (total_tiles == 0 || rows == 0) return C;
   dim3 grid(total_tiles, (Nout + BN - 1) / BN);
-  size_t sh = (size_t)(BM + BN * (swiglu ? 2 : 1)) * (BK + PAD) * sizeof(__half) + (size_t)BM * BN * sizeof(float) * (swiglu ? 2 : 1);
+  size_t operands = (size_t)(BM + BN * (swiglu ? 2 : 1)) * (BK + PAD) * sizeof(__half);
+  size_t epilogue = (size_t)BM * BN * sizeof(float) * (swiglu ? 2 : 1);
+  size_t sh = operands > epilogue ? operands : epilogue;
   auto stream = at::cuda::getCurrentCUDAStream();
   const int* ar = a_rows ? a_rows->data_ptr<int>() : nullptr;
   auto* a = reinterpret_cast<const __half*>(A.data_ptr<at::Half>());
@@ -281,6 +291,123 @@ torch::Tensor grouped_gemm(torch::Tensor A, c10::optional<torch::Tensor> a_rows,
     auto kern = grouped_gemm_kernel<false, false>;
     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)sh);
     kern<<<grid, 128, sh, stream>>>(a, ar, b, offsets.data_ptr<int>(), tile_offsets.data_ptr<int>(), E, Nout, K, nullptr, c);
+  }
+  return C;
+}
+
+
+// ---------------------------------------------------------------- grouped GEMV (decode)
+// When each expert has only a few rows, the layer is a stream over expert weights. One block
+// per (expert, 64 output columns); each warp owns 8 columns and reads their weight rows with
+// 16-byte loads, against up to GEMV_ROWS activation rows held in shared memory (more rows are
+// processed in further passes). Same epilogues as the GEMM.
+constexpr int GEMV_ROWS = 8, GEMV_COLS = 64;
+
+template <bool SWIGLU, bool SCALE>
+__global__ void __launch_bounds__(256) grouped_gemv_kernel(
+    const __half* __restrict__ A, const int* __restrict__ a_rows, const __half* __restrict__ B,
+    const int* __restrict__ offsets, int Nout, int K, const __half* __restrict__ scale, __half* __restrict__ C) {
+  extern __shared__ __align__(16) unsigned char smem[];
+  __half* xs = reinterpret_cast<__half*>(smem);  // [GEMV_ROWS][K]
+  int e = blockIdx.x, start = offsets[e], end = offsets[e + 1];
+  if (start == end) return;
+  int Nfull = SWIGLU ? 2 * Nout : Nout;
+  const __half* Be = B + (size_t)e * Nfull * K;
+  int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  for (int r0 = start; r0 < end; r0 += GEMV_ROWS) {
+    int nr = min(GEMV_ROWS, end - r0);
+    for (int c = threadIdx.x; c < GEMV_ROWS * K / 8; c += blockDim.x) {
+      int r = c / (K / 8), kk = (c % (K / 8)) * 8;
+      uint4 v = make_uint4(0, 0, 0, 0);
+      if (r < nr) {
+        int src = a_rows ? a_rows[r0 + r] : r0 + r;
+        v = *reinterpret_cast<const uint4*>(A + (size_t)src * K + kk);
+      }
+      *reinterpret_cast<uint4*>(xs + r * K + kk) = v;
+    }
+    __syncthreads();
+    for (int j = 0; j < GEMV_COLS / 8; ++j) {
+      int col = blockIdx.y * GEMV_COLS + warp * (GEMV_COLS / 8) + j;
+      if (col >= Nout) break;
+      float acc[GEMV_ROWS], accu[GEMV_ROWS];
+      for (int r = 0; r < GEMV_ROWS; ++r) acc[r] = accu[r] = 0.f;
+      const __half* wrow = Be + (size_t)col * K;
+      const __half* urow = Be + (size_t)(Nout + col) * K;
+#pragma unroll 2
+      for (int kk = lane * 8; kk < K; kk += 256) {
+        uint4 wv = *reinterpret_cast<const uint4*>(wrow + kk);
+        uint4 uv = SWIGLU ? *reinterpret_cast<const uint4*>(urow + kk) : make_uint4(0, 0, 0, 0);
+        const __half2* w2 = reinterpret_cast<const __half2*>(&wv);
+        const __half2* u2 = reinterpret_cast<const __half2*>(&uv);
+#pragma unroll
+        for (int r = 0; r < GEMV_ROWS; ++r) {
+          if (r >= nr) continue;
+          uint4 xv = *reinterpret_cast<const uint4*>(xs + r * K + kk);
+          const __half2* x2 = reinterpret_cast<const __half2*>(&xv);
+          for (int q = 0; q < 4; ++q) {
+            float2 xf = __half22float2(x2[q]), wf = __half22float2(w2[q]);
+            acc[r] += xf.x * wf.x + xf.y * wf.y;
+            if (SWIGLU) {
+              float2 uf = __half22float2(u2[q]);
+              accu[r] += xf.x * uf.x + xf.y * uf.y;
+            }
+          }
+        }
+      }
+#pragma unroll
+      for (int r = 0; r < GEMV_ROWS; ++r) {
+        if (r >= nr) continue;
+        for (int o = 16; o; o >>= 1) {
+          acc[r] += __shfl_xor_sync(0xffffffff, acc[r], o);
+          if (SWIGLU) accu[r] += __shfl_xor_sync(0xffffffff, accu[r], o);
+        }
+      }
+      if (lane < nr) {
+        float v = 0.f, u = 0.f;
+#pragma unroll
+        for (int r = 0; r < GEMV_ROWS; ++r)
+          if (r == lane) { v = acc[r]; u = accu[r]; }
+        int row = r0 + lane;
+        if (SWIGLU) {
+          float g = __half2float(__float2half(v)), up = __half2float(__float2half(u));
+          v = __half2float(__float2half(g / (1.f + expf(-g)))) * up;
+        }
+        if (SCALE) v = __half2float(__float2half(v)) * __half2float(scale[row]);
+        C[(size_t)row * Nout + col] = __float2half(v);
+      }
+    }
+    __syncthreads();
+  }
+}
+
+torch::Tensor grouped_gemv(torch::Tensor A, c10::optional<torch::Tensor> a_rows, torch::Tensor B,
+                           torch::Tensor offsets, int64_t rows, bool swiglu, c10::optional<torch::Tensor> scale) {
+  CHECK(A); CHECK(B); CHECK(offsets);
+  int E = B.size(0), K = B.size(2), Nfull = B.size(1);
+  TORCH_CHECK(A.size(1) == K && K % 8 == 0, "grouped_gemv: K must match and be a multiple of 8");
+  int Nout = swiglu ? Nfull / 2 : Nfull;
+  auto C = torch::empty({rows, Nout}, A.options());
+  if (rows == 0) return C;
+  dim3 grid(E, (Nout + GEMV_COLS - 1) / GEMV_COLS);
+  size_t sh = (size_t)GEMV_ROWS * K * sizeof(__half);
+  auto stream = at::cuda::getCurrentCUDAStream();
+  const int* ar = a_rows ? a_rows->data_ptr<int>() : nullptr;
+  auto* a = reinterpret_cast<const __half*>(A.data_ptr<at::Half>());
+  auto* b = reinterpret_cast<const __half*>(B.data_ptr<at::Half>());
+  auto* c = reinterpret_cast<__half*>(C.data_ptr<at::Half>());
+  const __half* s = scale ? reinterpret_cast<const __half*>(scale->data_ptr<at::Half>()) : nullptr;
+  if (swiglu) {
+    auto kern = grouped_gemv_kernel<true, false>;
+    cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)sh);
+    kern<<<grid, 256, sh, stream>>>(a, ar, b, offsets.data_ptr<int>(), Nout, K, nullptr, c);
+  } else if (s) {
+    auto kern = grouped_gemv_kernel<false, true>;
+    cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)sh);
+    kern<<<grid, 256, sh, stream>>>(a, ar, b, offsets.data_ptr<int>(), Nout, K, s, c);
+  } else {
+    auto kern = grouped_gemv_kernel<false, false>;
+    cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)sh);
+    kern<<<grid, 256, sh, stream>>>(a, ar, b, offsets.data_ptr<int>(), Nout, K, nullptr, c);
   }
   return C;
 }
@@ -318,5 +445,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("route", &route);
   m.def("sort_by_expert", &sort_by_expert);
   m.def("grouped_gemm", &grouped_gemm);
+  m.def("grouped_gemv", &grouped_gemv);
   m.def("combine", &combine);
 }
