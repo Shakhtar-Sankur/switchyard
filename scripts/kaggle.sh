@@ -35,6 +35,6 @@ from huggingface_hub import snapshot_download
 snapshot_download("allenai/OLMoE-1B-7B-0924", local_dir="/tmp/olmoe", allow_patterns=["*.json", "*.safetensors", "*.txt"])
 print("downloaded")
 PY
-  python bench/serve.py /tmp/olmoe 32 2>&1 | grep -v "Loading\|it/s\]" | tail -8
+  python bench/serve.py /tmp/olmoe 32 2>&1 | grep -v "Loading\|it/s\]\|CUDAEvent.h\|Download\|Reconstruct\|Fetching" | tail -40
 fi
 echo "== done"

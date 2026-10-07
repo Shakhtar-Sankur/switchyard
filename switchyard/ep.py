@@ -132,6 +132,12 @@ class ExpertParallel:
             return _NoStream()
         return _Both(torch.cuda.device(self.devices[r]), torch.cuda.stream(self.streams[r]))
 
+    def _alloc(self, d):
+        """Allocations for device d tied to rank d's MoE stream."""
+        if not self.cuda:
+            return _NoStream()
+        return torch.cuda.stream(self.streams[d])
+
     def _event(self, r):
         if not self.cuda:
             return None
@@ -174,14 +180,19 @@ class ExpertParallel:
                     sh["inbox"][d][r] = None
                     continue
                 dev = self.devices[d]
-                x = torch.empty(b - a, h.shape[1], dtype=h.dtype, device=dev)
+                # Buffers on rank d come from the pool of rank d's MoE stream, not from d's
+                # default stream: rank d's own thread is busy on its default stream (attention),
+                # and the allocator would hand a block freed there to this rank while d's
+                # kernels may still use it.
+                with self._alloc(d):
+                    x = torch.empty(b - a, h.shape[1], dtype=h.dtype, device=dev)
+                    lo = offsets[d * self.per:(d + 1) * self.per + 1]
+                    offs = torch.empty(self.per + 1, dtype=lo.dtype, device=dev)
+                    wts = torch.empty(b - a, dtype=wsorted.dtype, device=dev)
+                    cnt = torch.empty(self.per, dtype=counts.dtype, device=dev)
                 ops.gather_to(h, token[a:b], x)  # straight into rank d's memory
-                lo = offsets[d * self.per:(d + 1) * self.per + 1]
-                offs = torch.empty_like(lo, device=dev)
                 ops.copy_to(offs, (lo - a).to(lo.dtype).contiguous())
-                wts = torch.empty(b - a, dtype=wsorted.dtype, device=dev)
                 ops.copy_to(wts, wsorted[a:b].contiguous())
-                cnt = torch.empty(self.per, dtype=counts.dtype, device=dev)
                 ops.copy_to(cnt, counts[d * self.per:(d + 1) * self.per].contiguous())
                 sh["inbox"][d][r] = dict(x=x, offsets=offs, counts=cnt, w=wts, rows=b - a,
                                          hc=hc[d * self.per:(d + 1) * self.per], done=self._event(r))

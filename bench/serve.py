@@ -62,8 +62,12 @@ def ours_run(path, tok, new):
     ids = [tok(p).input_ids for p in PROMPTS]
     out = pm.generate(ids, new)
     firsts = []
+    same_threading = True
     for i in range(0, len(ids), 2):  # two prompts at a time, one on each GPU
-        logits = pm.forward([torch.tensor([ids[i]], device="cuda:0"), torch.tensor([ids[i + 1]], device="cuda:1")])
+        toks = [torch.tensor([ids[i]], device="cuda:0"), torch.tensor([ids[i + 1]], device="cuda:1")]
+        logits = pm.forward(toks)
+        one = pm.forward(toks, threaded=False)  # the same pass driven from one thread
+        same_threading &= all(torch.equal(a, b) for a, b in zip(logits, one))
         firsts += [logits[0][0, -1].float().cpu(), logits[1][0, -1].float().cpu()]
     speeds = {}
     for per_gpu in (1, 4, 16, 32):
@@ -77,7 +81,7 @@ def ours_run(path, tok, new):
             torch.cuda.synchronize(d)
         speeds[2 * per_gpu] = 2 * per_gpu * new / (time.perf_counter() - t)
     mem = [torch.cuda.max_memory_allocated(d) / 2**30 for d in (0, 1)]
-    return out, firsts, speeds, mem
+    return out, firsts, speeds, mem, same_threading
 
 
 def main(path, new=32):
@@ -87,7 +91,7 @@ def main(path, new=32):
     tok.padding_side = "left"
     hf_out, hf_first, hf_speed = hf_run(path, tok, new)
     print(json.dumps({"engine": "transformers device_map=auto fp16", "decode_tok_per_s": hf_speed}), flush=True)
-    our_out, our_first, our_speed, mem = ours_run(path, tok, new)
+    our_out, our_first, our_speed, mem, same_threading = ours_run(path, tok, new)
     agree = []
     for a, b in zip(hf_out, our_out):
         n = 0
@@ -95,7 +99,7 @@ def main(path, new=32):
             n += 1
         agree.append(n)
     rec = {"engine": "switchyard expert-parallel fp16, 2 GPUs", "decode_tok_per_s": our_speed,
-           "peak_GiB_per_gpu": mem, "tokens_identical_before_first_difference": agree, "of": new,
+           "peak_GiB_per_gpu": mem, "threaded_equals_single_thread": same_threading, "tokens_identical_before_first_difference": agree, "of": new,
            "identical_outputs": sum(a == b for a, b in zip(hf_out, our_out)), "prompts": len(PROMPTS)}
     if our_first:
         d = [(a - b).abs().max().item() for a, b in zip(our_first, hf_first)]
