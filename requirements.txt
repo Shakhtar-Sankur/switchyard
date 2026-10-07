@@ -1,0 +1,4 @@
+torch>=2.3
+safetensors
+transformers>=4.45  # tests compare against OlmoeForCausalLM
+pytest
