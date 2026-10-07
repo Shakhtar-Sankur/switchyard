@@ -23,11 +23,33 @@ class ParallelModel:
         self.ep = ExpertParallel(self.devices, self.c.experts, self.c.top_k, self.c.norm_topk_prob, ops)
 
     @torch.no_grad()
-    def forward(self, tokens, caches=None, valids=None):
-        """tokens[r]: [B_r, T] for rank r (every rank the same T). Returns logits per rank."""
+    def forward(self, tokens, caches=None, valids=None, threaded=True):
+        """tokens[r]: [B_r, T_r] for rank r. Returns logits per rank. Each GPU runs its whole
+        forward pass in its own thread (attention for its own requests), meeting the others at
+        every MoE layer."""
         R = len(self.models)
         caches = caches or [None] * R
         valids = valids or [None] * R
+        if not threaded:
+            return self._forward_one_thread(tokens, caches, valids)
+        states = [self.ep.new_state() for _ in range(self.c.layers)]
+
+        def run(r):
+            m = self.models[r]
+            x, st = m.begin(tokens[r], caches[r], valids[r])
+            for i in range(self.c.layers):
+                x, h = m.attention_block(i, x, st)
+                L = m.w["layers"][i]
+                out = self.ep.layer_rank(states[i], r, h, L["router"], L["gate_up"], L["down"])
+                x = x + out.view(st["B"], st["T"], -1)
+            return m.finish(x, st)
+
+        out = self.ep.run_ranks(run)
+        self._keep = states
+        return out
+
+    def _forward_one_thread(self, tokens, caches, valids):
+        R = len(self.models)
         xs, sts = [], []
         for r, m in enumerate(self.models):
             with torch.cuda.device(self.devices[r]) if self.devices[r].type == "cuda" else _null():
@@ -70,8 +92,8 @@ class ParallelModel:
         for _ in range(max_new_tokens):
             nxt = [l[:, -1].argmax(-1) for l in logits]
             for r, ids in enumerate(share):
-                for b, i in enumerate(ids):
-                    out[i].append(int(nxt[r][b]))
+                for i, t in zip(ids, nxt[r].tolist()):  # one transfer per GPU
+                    out[i].append(t)
             logits = self.forward([n[:, None] for n in nxt], caches)
         return out
 

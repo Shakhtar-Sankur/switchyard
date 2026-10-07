@@ -45,10 +45,11 @@ def pick(max_rows):
     return "gemm" if max_rows <= GEMM_MAX_ROWS else "cublas"
 
 
-def ffn(x, a_rows, offsets, counts, wsorted, gate_up, down, rows, mode):
+def ffn(x, a_rows, offsets, counts, wsorted, gate_up, down, rows, mode, host_counts=None):
     """The experts over rows already sorted by expert: row i is x[a_rows[i]] (or x[i] when
     a_rows is None); expert e owns rows offsets[e]:offsets[e+1]. Returns each row's expert
-    output scaled by its router weight, [rows, H]."""
+    output scaled by its router weight, [rows, H]. host_counts: the per-expert row counts as
+    a Python list, when the caller already has them (then nothing here waits for the GPU)."""
     E = ext()
     if rows == 0:
         return torch.empty(0, down.shape[1], dtype=x.dtype, device=x.device)
@@ -57,14 +58,14 @@ def ffn(x, a_rows, offsets, counts, wsorted, gate_up, down, rows, mode):
         return E.grouped_gemv(act, None, down, offsets, rows, False, wsorted)
     if mode == "gemm":
         toff = tile_offsets(counts)
-        total = int(toff[-1])
+        total = sum((c + 63) // 64 for c in host_counts) if host_counts is not None else int(toff[-1])
         act = E.grouped_gemm(x.contiguous(), a_rows, gate_up, offsets, toff, total, rows, True, None)
         return E.grouped_gemm(act, None, down, offsets, toff, total, rows, False, wsorted)
     # cublas: one GEMM pair per expert on its contiguous slice
     xs = x[a_rows.long()] if a_rows is not None else x
     y = torch.empty(rows, down.shape[1], dtype=x.dtype, device=x.device)
     start = 0
-    for e, n in enumerate(counts.tolist()):
+    for e, n in enumerate(host_counts if host_counts is not None else counts.tolist()):
         if n:
             gate, up = F.linear(xs[start:start + n], gate_up[e]).chunk(2, dim=-1)
             y[start:start + n] = F.linear(F.silu(gate) * up, down[e]) * wsorted[start:start + n, None]

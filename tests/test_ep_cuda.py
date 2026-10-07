@@ -28,11 +28,15 @@ def run(devices, sizes, mode, E=64, k=8):
     ep = ExpertParallel(devices, E, k, False, ops=CudaOps(mode))
     outs = ep.layer(hs, [router.to(d) for d in devices], [gu[r * per:(r + 1) * per].to(devices[r]) for r in range(R)],
                     [dn[r * per:(r + 1) * per].to(devices[r]) for r in range(R)])
+    threaded = ep.layer_threaded(hs, [router.to(d) for d in devices],
+                                 [gu[r * per:(r + 1) * per].to(devices[r]) for r in range(R)],
+                                 [dn[r * per:(r + 1) * per].to(devices[r]) for r in range(R)])
     for d in devices:
         torch.cuda.synchronize(d)
-    for h, o in zip(hs0, outs):
+    for h, o, t in zip(hs0, outs, threaded):
         want = kernels.moe_layer(h, router, gu, dn, k, False, mode)
         assert torch.equal(o.to("cuda:0"), want)
+        assert torch.equal(t.to("cuda:0"), want)
     return ep
 
 

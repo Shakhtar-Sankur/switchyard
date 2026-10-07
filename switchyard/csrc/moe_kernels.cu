@@ -489,12 +489,12 @@ bool enable_peer_access(int64_t device, int64_t peer) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("route", &route);
-  m.def("sort_by_expert", &sort_by_expert);
-  m.def("grouped_gemm", &grouped_gemm);
-  m.def("grouped_gemv", &grouped_gemv);
-  m.def("combine", &combine);
-  m.def("gather_rows", &gather_rows);
-  m.def("copy_async", &copy_async);
-  m.def("enable_peer_access", &enable_peer_access);
+  m.def("route", &route, py::call_guard<py::gil_scoped_release>());
+  m.def("sort_by_expert", &sort_by_expert, py::call_guard<py::gil_scoped_release>());
+  m.def("grouped_gemm", &grouped_gemm, py::call_guard<py::gil_scoped_release>());
+  m.def("grouped_gemv", &grouped_gemv, py::call_guard<py::gil_scoped_release>());
+  m.def("combine", &combine, py::call_guard<py::gil_scoped_release>());
+  m.def("gather_rows", &gather_rows, py::call_guard<py::gil_scoped_release>());
+  m.def("copy_async", &copy_async, py::call_guard<py::gil_scoped_release>());
+  m.def("enable_peer_access", &enable_peer_access, py::call_guard<py::gil_scoped_release>());
 }

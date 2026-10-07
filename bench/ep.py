@@ -47,7 +47,8 @@ def main(sizes=(1, 4, 16, 64, 256, 1024), E=64, k=8, H=2048, I=1024):
         hs = [torch.randn(N, H, device=d, generator=None).half() for d in devs]
         both = torch.cat([hs[0], hs[1].to("cuda:0")])
         rec = {"tokens_per_gpu": N,
-               "switchyard_ep_ms": timed(lambda: ep.layer(hs, routers, gus, dns), devs),
+               "switchyard_ep_ms": timed(lambda: ep.layer_threaded(hs, routers, gus, dns), devs),
+               "switchyard_ep_one_thread_ms": timed(lambda: ep.layer(hs, routers, gus, dns), devs),
                "one_gpu_all_experts_ms": timed(lambda: kernels.moe_layer(both, router, gu, dn, k, False), ["cuda:0"])}
         ep.stats = {"dispatched_rows": 0, "local_rows": 0}
         ep.layer(hs, routers, gus, dns)

@@ -40,6 +40,9 @@ def test_expert_parallel_layer_is_bit_identical_to_one_device(R, sizes):
             assert torch.allclose(o, moe.experts_reference(h, idx, w, gu, dn), atol=1e-5)
     if R > 1 and sum(sizes[:R]) > 4:
         assert ep.stats["dispatched_rows"] > 0  # tokens really crossed ranks
+    threaded = ep.layer_threaded(hs, [router] * R, [gu[r * per:(r + 1) * per] for r in range(R)],
+                                 [dn[r * per:(r + 1) * per] for r in range(R)])
+    assert all(torch.equal(a, b) for a, b in zip(outs, threaded))
 
 
 def test_a_model_served_over_two_ranks_generates_what_one_model_does():
@@ -60,3 +63,25 @@ def test_logits_over_four_ranks_match_one_model():
     toks = [torch.tensor([p]) for p in ps]
     for t, got in zip(toks, four.forward(toks)):
         assert (got - one.forward(t)).abs().max().item() < 1e-5
+
+
+def test_threaded_and_single_threaded_forward_agree():
+    path, _ = checkpoint(experts=16, top_k=4)
+    two = ParallelModel(path, ["cpu", "cpu"], dtype=torch.float32)
+    toks = [torch.tensor([p[:7]]) for p in prompts(2, seed=4)]
+    a = two.forward(toks, threaded=True)
+    b = two.forward(toks, threaded=False)
+    assert all(torch.equal(x, y) for x, y in zip(a, b))
+
+
+def test_a_failing_rank_does_not_hang_the_others():
+    ep = ExpertParallel(["cpu", "cpu"], 4, 2, False)
+
+    def fn(r):
+        if r == 1:
+            raise ValueError("boom")
+        ep.barrier.wait()
+
+    with pytest.raises(Exception):
+        ep.run_ranks(fn)
+    assert ep.run_ranks(lambda r: r) == [0, 1]  # usable again
