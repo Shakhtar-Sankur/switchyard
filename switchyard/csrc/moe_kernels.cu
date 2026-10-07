@@ -9,6 +9,7 @@
 //   combine      each token's k expert outputs summed in fp32, in expert order
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include <cuda_fp16.h>
 #include <mma.h>
 
@@ -298,10 +299,10 @@ torch::Tensor grouped_gemm(torch::Tensor A, c10::optional<torch::Tensor> a_rows,
 
 // ---------------------------------------------------------------- grouped GEMV (decode)
 // When each expert has only a few rows, the layer is a stream over expert weights. One block
-// per (expert, 64 output columns); each warp owns 8 columns and reads their weight rows with
+// per (expert, 32 output columns); each warp owns 4 columns and reads their weight rows with
 // 16-byte loads, against up to GEMV_ROWS activation rows held in shared memory (more rows are
 // processed in further passes). Same epilogues as the GEMM.
-constexpr int GEMV_ROWS = 8, GEMV_COLS = 64;
+constexpr int GEMV_ROWS = 8, GEMV_COLS = 32;  // 4 columns per warp: more blocks in flight
 
 template <bool SWIGLU, bool SCALE>
 __global__ void __launch_bounds__(256) grouped_gemv_kernel(
@@ -441,10 +442,58 @@ torch::Tensor combine(torch::Tensor y, torch::Tensor pos_of, torch::Tensor idx, 
   return out;
 }
 
+
+// ---------------------------------------------------------------- expert parallelism helpers
+// Rows of src (on this GPU) picked by index, written to dst, which may live on another GPU
+// (peer access enabled): the dispatch is a kernel writing straight into the peer's memory.
+__global__ void gather_rows_kernel(const __half* __restrict__ src, const int* __restrict__ index, int n, int H,
+                                   __half* __restrict__ dst) {
+  int row = blockIdx.x;
+  if (row >= n) return;
+  const uint4* s = reinterpret_cast<const uint4*>(src + (size_t)index[row] * H);
+  uint4* d = reinterpret_cast<uint4*>(dst + (size_t)row * H);
+  for (int i = threadIdx.x; i < H / 8; i += blockDim.x) d[i] = s[i];
+}
+
+void gather_rows(torch::Tensor src, torch::Tensor index, torch::Tensor dst) {
+  CHECK(src); CHECK(index); CHECK(dst);
+  int n = index.numel(), H = src.size(1);
+  TORCH_CHECK(H % 8 == 0 && dst.size(0) == n && dst.size(1) == H, "gather_rows: shapes");
+  if (n == 0) return;
+  gather_rows_kernel<<<n, 128, 0, at::cuda::getCurrentCUDAStream()>>>(
+      reinterpret_cast<const __half*>(src.data_ptr<at::Half>()), index.data_ptr<int>(), n, H,
+      reinterpret_cast<__half*>(dst.data_ptr<at::Half>()));
+}
+
+// A contiguous copy between any two devices on the current stream (DMA, peer to peer).
+void copy_async(torch::Tensor dst, torch::Tensor src) {
+  TORCH_CHECK(dst.is_contiguous() && src.is_contiguous() && dst.nbytes() == src.nbytes(), "copy_async: shapes");
+  if (src.nbytes() == 0) return;
+  C10_CUDA_CHECK(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), src.nbytes(), cudaMemcpyDefault,
+                                 at::cuda::getCurrentCUDAStream()));
+}
+
+bool enable_peer_access(int64_t device, int64_t peer) {
+  int can = 0;
+  C10_CUDA_CHECK(cudaDeviceCanAccessPeer(&can, device, peer));
+  if (!can) return false;
+  int prev;
+  C10_CUDA_CHECK(cudaGetDevice(&prev));
+  C10_CUDA_CHECK(cudaSetDevice(device));
+  cudaError_t e = cudaDeviceEnablePeerAccess(peer, 0);
+  if (e == cudaErrorPeerAccessAlreadyEnabled) cudaGetLastError();
+  else C10_CUDA_CHECK(e);
+  C10_CUDA_CHECK(cudaSetDevice(prev));
+  return true;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("route", &route);
   m.def("sort_by_expert", &sort_by_expert);
   m.def("grouped_gemm", &grouped_gemm);
   m.def("grouped_gemv", &grouped_gemv);
   m.def("combine", &combine);
+  m.def("gather_rows", &gather_rows);
+  m.def("copy_async", &copy_async);
+  m.def("enable_peer_access", &enable_peer_access);
 }

@@ -83,10 +83,9 @@ class Model:
         a = torch.matmul(p, v).transpose(1, 2).reshape(B, T, c.heads * c.head_dim)
         return F.linear(a, L["wo"])
 
-    @torch.no_grad()
-    def forward(self, tokens, cache=None, valid=None):
-        """tokens [B, T]; valid [B, T] marks real tokens (False = left padding). With a
-        cache, the tokens are appended after what it already holds."""
+    # forward() in three parts, so that several models (one per GPU) can step through the
+    # layers together and share their MoE layers (see ep.py / serve.py).
+    def begin(self, tokens, cache=None, valid=None):
         c, W = self.c, self.w
         B, T = tokens.shape
         dev = tokens.device
@@ -94,8 +93,7 @@ class Model:
             valid = torch.ones(B, T, dtype=torch.bool, device=dev)
         start = cache.length if cache is not None else 0
         base = cache.next_pos if cache is not None else torch.zeros(B, dtype=torch.int64, device=dev)
-        positions = base[:, None] + torch.cumsum(valid.long(), 1) - 1
-        positions = positions.clamp(min=0)
+        positions = (base[:, None] + torch.cumsum(valid.long(), 1) - 1).clamp(min=0)
         if cache is not None:
             cache.valid[:, start:start + T] = valid
             keys_valid = cache.valid[:, :start + T]
@@ -109,15 +107,33 @@ class Model:
         diag[torch.arange(T, device=dev), start + torch.arange(T, device=dev)] = True
         mask = mask | (~mask.any(-1, keepdim=True) & diag[None])
         cos, sin = self._rope(positions, W["embed"].dtype)
-        x = F.embedding(tokens, W["embed"])
-        for i, L in enumerate(W["layers"]):
-            x = x + self._attention(L, rmsnorm(x, L["attn_norm"], c.rms_eps), cos, sin, cache, i, start, mask)
-            h = rmsnorm(x, L["mlp_norm"], c.rms_eps)
-            x = x + self.moe(i, h.reshape(B * T, -1)).view(B, T, -1)
+        state = dict(B=B, T=T, cache=cache, start=start, mask=mask, cos=cos, sin=sin, base=base, valid=valid)
+        return F.embedding(tokens, W["embed"]), state
+
+    def attention_block(self, i, x, st):
+        """x + attention(norm(x)); returns it and the normalized input of the MoE layer [B*T, H]."""
+        L, c = self.w["layers"][i], self.c
+        x = x + self._attention(L, rmsnorm(x, L["attn_norm"], c.rms_eps), st["cos"], st["sin"], st["cache"], i,
+                                st["start"], st["mask"])
+        return x, rmsnorm(x, L["mlp_norm"], c.rms_eps).reshape(st["B"] * st["T"], -1)
+
+    def finish(self, x, st):
+        cache = st["cache"]
         if cache is not None:
-            cache.length = start + T
-            cache.next_pos = base + valid.long().sum(1)
-        return F.linear(rmsnorm(x, W["final_norm"], c.rms_eps), W["lm_head"])
+            cache.length = st["start"] + st["T"]
+            cache.next_pos = st["base"] + st["valid"].long().sum(1)
+        W = self.w
+        return F.linear(rmsnorm(x, W["final_norm"], self.c.rms_eps), W["lm_head"])
+
+    @torch.no_grad()
+    def forward(self, tokens, cache=None, valid=None):
+        """tokens [B, T]; valid [B, T] marks real tokens (False = left padding). With a
+        cache, the tokens are appended after what it already holds."""
+        x, st = self.begin(tokens, cache, valid)
+        for i in range(self.c.layers):
+            x, h = self.attention_block(i, x, st)
+            x = x + self.moe(i, h).view(st["B"], st["T"], -1)
+        return self.finish(x, st)
 
     @torch.no_grad()
     def generate(self, prompts, max_new_tokens, eos=None):
