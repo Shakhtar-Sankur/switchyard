@@ -153,8 +153,9 @@ class ExpertParallel:
                 y = torch.empty(idx.numel(), hs[r].shape[1], dtype=hs[r].dtype, device=hs[r].device)
                 st.append(dict(idx=idx, counts=counts, offsets=offsets, token=token, wsorted=wsorted,
                                pos_of=pos_of, y=y))
-        for r in range(R):  # segment bounds per destination (one host sync per rank)
-            off = ops.host(st[r]["offsets"])
+        for r in range(R):  # segment bounds per destination (one host read per rank, on its stream)
+            with self._on(r):
+                off = ops.host(st[r]["offsets"])
             st[r]["seg"] = [(off[d * self.per], off[(d + 1) * self.per]) for d in range(R)]
 
         # 2. dispatch: rank r writes the rows bound for rank d into d's memory
@@ -173,7 +174,8 @@ class ExpertParallel:
                     ops.copy_to(offs, (lo - a).to(lo.dtype).contiguous())
                     wts = torch.empty(b - a, dtype=st[r]["wsorted"].dtype, device=dev)
                     ops.copy_to(wts, st[r]["wsorted"][a:b].contiguous())
-                    cnt = st[r]["counts"][d * self.per:(d + 1) * self.per]
+                    cnt = torch.empty(self.per, dtype=st[r]["counts"].dtype, device=dev)
+                    ops.copy_to(cnt, st[r]["counts"][d * self.per:(d + 1) * self.per].contiguous())
                     inbox[d][r] = dict(x=x, offsets=offs, counts=cnt, w=wts, rows=b - a, done=self._event(r))
                     self.stats["dispatched_rows"] += b - a
 

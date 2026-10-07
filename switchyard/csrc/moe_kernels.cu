@@ -77,6 +77,7 @@ std::vector<torch::Tensor> route(torch::Tensor logits, int64_t k, bool norm) {
   TORCH_CHECK(E <= 128 && k <= 8 && k <= E, "route: at most 128 experts and top-8");
   auto idx = torch::empty({N, k}, logits.options().dtype(torch::kInt32));
   auto w = torch::empty({N, k}, logits.options());
+  if (N == 0) return {idx, w};
   auto stream = at::cuda::getCurrentCUDAStream();
   int threads = 256, blocks = (N * 32 + threads - 1) / threads;
   auto* l = reinterpret_cast<const __half*>(logits.data_ptr<at::Half>());
