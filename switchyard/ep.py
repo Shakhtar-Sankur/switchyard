@@ -164,9 +164,13 @@ class ExpertParallel:
     def phase_send(self, sh, r, h, router):
         """Route rank r's tokens, sort them by expert, and send every other rank its rows."""
         ops, R = self.ops, self.R
+        # The caller's stream (attention wrote h there), taken before _on(r) makes the MoE
+        # stream the current one: inside, current_stream() is the MoE stream itself, and waiting
+        # on it would let the router read h before attention has written it.
+        caller = torch.cuda.current_stream(self.devices[r]) if self.cuda else None
         with self._on(r):
-            if self.cuda:
-                self.streams[r].wait_stream(torch.cuda.current_stream(self.devices[r]))
+            if caller is not None:
+                self.streams[r].wait_stream(caller)
             idx, w = ops.route(h, router, self.k, self.norm)
             counts, offsets, token, wsorted, pos_of = ops.sort(idx, w, self.E)
             y = torch.empty(idx.numel(), h.shape[1], dtype=h.dtype, device=h.device)

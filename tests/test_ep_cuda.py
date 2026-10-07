@@ -84,3 +84,31 @@ def test_threaded_serving_on_one_gpu_matches_one_thread():
 @two
 def test_threaded_serving_on_two_gpus_matches_one_thread():
     _threaded_generate_matches(["cuda:0", "cuda:1"])
+
+
+@cuda
+@pytest.mark.parametrize("threaded", [False, True])
+def test_the_layer_waits_for_its_input(threaded):
+    # h is written on the caller's stream after a long GPU sleep; a layer that does not order
+    # its stream after the caller's reads the old contents (zeros).
+    from switchyard import kernels
+    devices = ["cuda:0", "cuda:1"] if torch.cuda.device_count() > 1 else ["cuda:0", "cuda:0"]
+    router, gu, dn = weights(64)
+    g = torch.Generator(device="cuda").manual_seed(3)
+    real = [torch.randn(16, router.shape[1], device="cuda", generator=g).half() for _ in devices]
+    torch.cuda.synchronize()
+    hs = [torch.zeros(16, router.shape[1], dtype=torch.half, device=d) for d in devices]
+    ep = ExpertParallel(devices, 64, 8, False, ops=CudaOps("gemv"))
+    args = ([router.to(d) for d in devices], [gu[r * 32:(r + 1) * 32].to(d) for r, d in enumerate(devices)],
+            [dn[r * 32:(r + 1) * 32].to(d) for r, d in enumerate(devices)])
+    for d in devices:
+        torch.cuda.synchronize(d)
+    for h, x, d in zip(hs, real, devices):
+        with torch.cuda.device(d):
+            torch.cuda._sleep(200_000_000)  # ~0.1 s at T4 clocks
+            h.copy_(x)
+    outs = ep.layer_threaded(hs, *args) if threaded else ep.layer(hs, *args)
+    for d in devices:
+        torch.cuda.synchronize(d)
+    for x, o in zip(real, outs):
+        assert torch.equal(o.to("cuda:0"), kernels.moe_layer(x, router, gu, dn, 8, False, "gemv"))
