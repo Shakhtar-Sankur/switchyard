@@ -131,7 +131,7 @@ Two honest conclusions. My dispatch beats NCCL only between 16 and 256 tokens pe
 on PCIe T4s splitting the experts is never faster than keeping all 64 on one GPU: the
 transfers cost more than the halved expert work saves. Expert parallelism here buys
 **memory**: OLMoE-1B-7B is 13.8 GB in fp16 and does not fit one 15 GB T4 with room for a KV
-cache; split, it takes 7.6 GB per GPU. With NVLink, or more GPUs and larger batches, the
+cache; split, it takes 7.6 GiB per GPU. With NVLink, or more GPUs and larger batches, the
 trade changes; I have not measured that.
 
 ## M3: serving OLMoE-1B-7B on two T4s (`switchyard/serve.py`)
