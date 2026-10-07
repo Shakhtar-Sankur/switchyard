@@ -129,8 +129,12 @@ def main():
                         err, rel = fn()
                         rec.update(ok=bool(rel <= tol), max_abs_err=round(err, 5), max_rel_err=round(rel, 5))
                     except Exception as e:  # launch failure is the bug being checked for
-                        rec.update(ok=False, error=f"{type(e).__name__}: {str(e)[:300]}")
-                        if "trace" not in [r.get("kernel") for r in results]:
+                        msg = str(e)
+                        # the line that says why (a build's linker/compiler error, a CUDA error)
+                        why = next((l for l in msg.splitlines() if "error" in l.lower() and "ninja" not in l.lower()),
+                                   msg.splitlines()[0] if msg else "")
+                        rec.update(ok=False, error=f"{type(e).__name__}: {why[:300]}")
+                        if not any("error" in r for r in results):  # the first failure in full
                             traceback.print_exc()
                     rec["seconds"] = round(time.time() - t, 1)
                     results.append(rec)
