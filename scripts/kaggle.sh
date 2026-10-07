@@ -26,7 +26,7 @@ if [ "$RUN" = all ] || [ "$RUN" = ep ]; then
   echo "== benchmark: the layer with its experts over two GPUs (switchyard peer-to-peer)"
   python bench/ep.py
   echo "== benchmark: same, NCCL all_to_all as the transport"
-  python bench/ep_nccl.py 2>&1 | grep '^{'
+  python bench/ep_nccl.py 2>&1 | grep '^{\|Error' || true
 fi
 if [ "$RUN" = all ] || [ "$RUN" = serve ]; then
   echo "== OLMoE-1B-7B on two T4s"
