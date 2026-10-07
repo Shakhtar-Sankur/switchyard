@@ -117,6 +117,9 @@ class ExpertParallel:
         if self.cuda:
             from . import kernels
             self.streams = [torch.cuda.Stream(d) for d in self.devices]
+            # mail[r][d]: a stream on device d used only to allocate what rank r sends to rank d
+            # (see phase_send); no kernel runs on it.
+            self.mail = [[torch.cuda.Stream(d) for d in self.devices] for _ in self.devices]
             idx = sorted({d.index for d in self.devices})
             self.peer = all(kernels.ext().enable_peer_access(a, b) for a in idx for b in idx if a != b)
         self.stats = {"dispatched_rows": 0, "local_rows": 0}
@@ -132,11 +135,11 @@ class ExpertParallel:
             return _NoStream()
         return _Both(torch.cuda.device(self.devices[r]), torch.cuda.stream(self.streams[r]))
 
-    def _alloc(self, d):
-        """Allocations for device d tied to rank d's MoE stream."""
+    def _alloc(self, r, d):
+        """Allocations on device d for what rank r sends there, from a pool of their own."""
         if not self.cuda:
             return _NoStream()
-        return torch.cuda.stream(self.streams[d])
+        return torch.cuda.stream(self.mail[r][d])
 
     def _event(self, r):
         if not self.cuda:
@@ -180,11 +183,15 @@ class ExpertParallel:
                     sh["inbox"][d][r] = None
                     continue
                 dev = self.devices[d]
-                # Buffers on rank d come from the pool of rank d's MoE stream, not from d's
-                # default stream: rank d's own thread is busy on its default stream (attention),
-                # and the allocator would hand a block freed there to this rank while d's
-                # kernels may still use it.
-                with self._alloc(d):
+                # The buffers on device d come from a pool only rank r allocates from. The
+                # caching allocator reuses a freed block at once for the next allocation on the
+                # same stream, which is safe only for kernels on that stream; rank r writes from
+                # its own stream. In a pool of rank d's (its default or MoE stream) this rank
+                # could be handed a block that rank d's thread has just freed while d's kernels
+                # still read it (an offsets array, say), and overwrite it. A block of this pool
+                # is reused only after rank r has waited for d to finish with it (the events
+                # d sends back with the results).
+                with self._alloc(r, d):
                     x = torch.empty(b - a, h.shape[1], dtype=h.dtype, device=dev)
                     lo = offsets[d * self.per:(d + 1) * self.per + 1]
                     offs = torch.empty(self.per + 1, dtype=lo.dtype, device=dev)

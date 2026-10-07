@@ -5,6 +5,8 @@ import pytest
 import torch
 
 from switchyard.ep import CudaOps, ExpertParallel
+from switchyard.serve import ParallelModel
+from tiny import checkpoint, prompts
 
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")
 two = pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two GPUs")
@@ -55,3 +57,30 @@ def test_two_gpus_peer_to_peer(mode, sizes):
     assert ep.peer
     if sum(sizes) > 2:
         assert ep.stats["dispatched_rows"] > 0
+
+
+def _served(devices):
+    path, _ = checkpoint(experts=16, top_k=4, layers=6)
+    pm = ParallelModel(path, devices, dtype=torch.float16)
+    return pm, prompts(8, seed=5)
+
+
+def _threaded_generate_matches(devices):
+    # Many layers and decode steps, every GPU's thread allocating and freeing while the other
+    # sends to it: the case a one-layer test is too short to race in.
+    pm, ps = _served(devices)
+    pm.threaded = False
+    want = pm.generate(ps, 24)
+    pm.threaded = True
+    for _ in range(3):
+        assert pm.generate(ps, 24) == want
+
+
+@cuda
+def test_threaded_serving_on_one_gpu_matches_one_thread():
+    _threaded_generate_matches(["cuda:0", "cuda:0"])
+
+
+@two
+def test_threaded_serving_on_two_gpus_matches_one_thread():
+    _threaded_generate_matches(["cuda:0", "cuda:1"])
