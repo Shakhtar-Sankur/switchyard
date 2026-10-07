@@ -1,0 +1,26 @@
+# Kaggle, 2x Tesla T4 (15 GB, driver 580.178.04), torch 2.11.0+cu128, CUDA 12.8, peer access 0<->1: True
+# commit 7681113, scripts/kaggle.sh RUN=all; 68 tests passed
+== benchmark: one OLMoE MoE layer on one GPU
+{"bench": "moe_layer", "gpu": "Tesla T4", "experts": 64, "top_k": 8, "hidden": 2048, "expert_width": 1024}
+{"tokens": 1, "loop_ms": 4.884672164916992, "sorted_loop_ms": 1.3069119453430176, "switchyard_ms": 0.6913279891014099, "gemv_ms": 0.6347200274467468, "gemm_ms": 1.1969280242919922, "max_err_switchyard": 0.00017145276069641113, "max_err_fp16_loop": 0.00027358531951904297, "speedup_vs_loop": 7.065636343273333, "speedup_vs_sorted_loop": 1.890436906860585, "max_rows_per_expert": 1, "experts_used": 8, "weight_GBps": 145.60859329714458}
+{"tokens": 8, "loop_ms": 11.98630428314209, "sorted_loop_ms": 5.123104095458984, "switchyard_ms": 2.214303970336914, "gemv_ms": 2.1604158878326416, "gemm_ms": 3.901439905166626, "max_err_switchyard": 0.00021949410438537598, "max_err_fp16_loop": 0.00034740567207336426, "speedup_vs_loop": 5.413125046837329, "speedup_vs_sorted_loop": 2.313640838877007, "max_rows_per_expert": 4, "experts_used": 41, "weight_GBps": 232.98490131032196}
+{"tokens": 32, "loop_ms": 16.441343307495117, "sorted_loop_ms": 7.262495994567871, "switchyard_ms": 3.6065280437469482, "gemv_ms": 4.252287864685059, "gemm_ms": 5.941247940063477, "max_err_switchyard": 0.0004585087299346924, "max_err_fp16_loop": 0.0006495118141174316, "speedup_vs_loop": 4.5587731768788995, "speedup_vs_sorted_loop": 2.0137084493657813, "max_rows_per_expert": 9, "experts_used": 63, "weight_GBps": 219.8023823423294}
+{"tokens": 128, "loop_ms": 17.1810245513916, "sorted_loop_ms": 7.910655975341797, "switchyard_ms": 6.455296039581299, "gemv_ms": 13.31612777709961, "gemm_ms": 6.545760154724121, "max_err_switchyard": 0.0004967153072357178, "max_err_fp16_loop": 0.0005903542041778564, "speedup_vs_loop": 2.6615393695416008, "speedup_vs_sorted_loop": 1.2254520825748054, "max_rows_per_expert": 24, "experts_used": 64, "weight_GBps": 124.75126827060802}
+{"tokens": 512, "loop_ms": 17.161376953125, "sorted_loop_ms": 8.49510383605957, "switchyard_ms": 9.390080451965332, "gemv_ms": 50.85123062133789, "gemm_ms": 10.096223831176758, "max_err_switchyard": 0.0005302131175994873, "max_err_fp16_loop": 0.000734865665435791, "speedup_vs_loop": 1.8276070200796997, "speedup_vs_sorted_loop": 0.9046891429222585, "max_rows_per_expert": 85, "experts_used": 64, "weight_GBps": 85.76139172816676}
+{"tokens": 2048, "loop_ms": 20.406272888183594, "sorted_loop_ms": 16.800128936767578, "switchyard_ms": 15.5316801071167, "gemv_ms": 203.59986877441406, "gemm_ms": 29.14771270751953, "max_err_switchyard": 0.0006515979766845703, "max_err_fp16_loop": 0.0010551810264587402, "speedup_vs_loop": 1.313848389063417, "speedup_vs_sorted_loop": 1.0816684879486842, "max_rows_per_expert": 297, "experts_used": 64, "weight_GBps": 51.84927596023589}
+{"tokens": 4096, "loop_ms": 30.0765438079834, "sorted_loop_ms": 28.178815841674805, "switchyard_ms": 25.57948875427246, "gemv_ms": 419.2899169921875, "gemm_ms": 59.142398834228516, "max_err_switchyard": 0.0007075071334838867, "max_err_fp16_loop": 0.001594841480255127, "speedup_vs_loop": 1.1758070732731047, "speedup_vs_sorted_loop": 1.1016176324856448, "max_rows_per_expert": 567, "experts_used": 64, "weight_GBps": 31.482504429080592}
+== benchmark: the layer with its experts over two GPUs (switchyard peer-to-peer)
+{"bench": "ep_layer", "gpus": 2, "peer_access": true, "experts": 64, "top_k": 8}
+{"tokens_per_gpu": 1, "switchyard_ep_ms": 1.9768870006373618, "switchyard_ep_one_thread_ms": 1.6928610002651112, "one_gpu_all_experts_ms": 1.003633000436821, "rows_sent_to_peer": 6, "rows_kept_local": 10}
+{"tokens_per_gpu": 4, "switchyard_ep_ms": 3.397829000277852, "switchyard_ep_one_thread_ms": 2.7442910004538135, "one_gpu_all_experts_ms": 2.591677999589592, "rows_sent_to_peer": 33, "rows_kept_local": 31}
+{"tokens_per_gpu": 16, "switchyard_ep_ms": 4.533013000582287, "switchyard_ep_one_thread_ms": 4.067574999680801, "one_gpu_all_experts_ms": 4.18535900007555, "rows_sent_to_peer": 123, "rows_kept_local": 133}
+{"tokens_per_gpu": 64, "switchyard_ep_ms": 7.142403000216291, "switchyard_ep_one_thread_ms": 7.295616999726917, "one_gpu_all_experts_ms": 6.568368999978702, "rows_sent_to_peer": 502, "rows_kept_local": 522}
+{"tokens_per_gpu": 256, "switchyard_ep_ms": 9.44469800015213, "switchyard_ep_one_thread_ms": 8.792057000391651, "one_gpu_all_experts_ms": 9.30848000007245, "rows_sent_to_peer": 2064, "rows_kept_local": 2032}
+{"tokens_per_gpu": 1024, "switchyard_ep_ms": 20.83184299954155, "switchyard_ep_one_thread_ms": 21.80611499989027, "one_gpu_all_experts_ms": 16.865507000147772, "rows_sent_to_peer": 8198, "rows_kept_local": 8186}
+== benchmark: same, NCCL all_to_all as the transport
+{"tokens_per_gpu": 1, "nccl_all_to_all_ms": 1.5936509998937254}
+{"tokens_per_gpu": 4, "nccl_all_to_all_ms": 2.4383690006288816}
+{"tokens_per_gpu": 16, "nccl_all_to_all_ms": 4.117382000004}
+{"tokens_per_gpu": 64, "nccl_all_to_all_ms": 7.255888000145205}
+{"tokens_per_gpu": 256, "nccl_all_to_all_ms": 11.027917999854253}
+{"tokens_per_gpu": 1024, "nccl_all_to_all_ms": 19.0052010002546}

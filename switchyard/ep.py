@@ -18,6 +18,7 @@ order, so the output is bit-identical to the single-GPU layer.
 The orchestration only calls a small set of operations (`Ops`): CUDA kernels on GPUs, plain
 PyTorch on the CPU, so the same code is tested without GPUs."""
 
+import math
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -122,7 +123,16 @@ class ExpertParallel:
             self.mail = [[torch.cuda.Stream(d) for d in self.devices] for _ in self.devices]
             idx = sorted({d.index for d in self.devices})
             self.peer = all(kernels.ext().enable_peer_access(a, b) for a in idx for b in idx if a != b)
-        self.stats = {"dispatched_rows": 0, "local_rows": 0}
+        self.stats = {"dispatched_rows": 0, "local_rows": 0, "dropped_rows": 0, "routed_rows": 0}
+        # capacity_factor: None routes every (token, expert) choice (dropless). A number c gives
+        # every expert room for c * (rank's tokens) * k / E rows of each rank's batch, as GShard
+        # does per group; choices beyond that, in token order, are dropped (weight 0: the token
+        # keeps the rest of its experts and the residual). The dropped rows are still computed
+        # here, so this measures the effect on the output, not a speedup.
+        self.capacity_factor = None
+        # trace: None, or a list that gets (rank, per-expert row counts) for every layer and
+        # rank, in call order (layer by layer when one thread drives all ranks).
+        self.trace = None
         self._pool = None
         self.barrier = threading.Barrier(self.R)
 
@@ -173,6 +183,10 @@ class ExpertParallel:
                 self.streams[r].wait_stream(caller)
             idx, w = ops.route(h, router, self.k, self.norm)
             counts, offsets, token, wsorted, pos_of = ops.sort(idx, w, self.E)
+            if self.capacity_factor is not None:
+                wsorted = self._drop(offsets, counts, wsorted)
+            if self.trace is not None:
+                self.trace.append((r, counts.clone()))
             y = torch.empty(idx.numel(), h.shape[1], dtype=h.dtype, device=h.device)
             off = ops.host(offsets)  # the one host read of the layer, on this rank's stream
             hc = [off[e + 1] - off[e] for e in range(self.E)]
@@ -208,6 +222,19 @@ class ExpertParallel:
                 sh["inbox"][d][r] = dict(x=x, offsets=offs, counts=cnt, w=wts, rows=b - a,
                                          hc=hc[d * self.per:(d + 1) * self.per], done=self._event(r))
                 self.stats["dispatched_rows"] += b - a
+
+    def _drop(self, offsets, counts, wsorted):
+        """Zero the weights of the rows past each expert's capacity (rows are sorted by expert,
+        tokens in order within an expert)."""
+        M = wsorted.shape[0]
+        if M == 0:
+            return wsorted
+        cap = math.ceil(self.capacity_factor * M / self.E)
+        start = offsets[:-1].long().repeat_interleave(counts.long(), output_size=M)
+        keep = (torch.arange(M, device=wsorted.device) - start) < cap
+        self.stats["dropped_rows"] += M - int(keep.sum())
+        self.stats["routed_rows"] += M
+        return wsorted * keep.to(wsorted.dtype)
 
     def phase_compute(self, sh, d, h, gate_up, down):
         """Rank d's experts over its own rows and over every segment it received; each result

@@ -1,0 +1,9 @@
+# Kaggle, 2x Tesla T4, torch 2.11.0+cu128, CUDA 12.8, peer access True
+# commit 645a87e, scripts/kaggle.sh RUN=serve; 72 tests passed
+# OLMoE-1B-7B-0924 (allenai), fp16, greedy, 32 new tokens; decode_tok_per_s keys = total batch size
+{"engine": "transformers device_map=auto fp16", "decode_tok_per_s": {"1": 27.019782598856676, "8": 52.05338915313013}}
+{"engine": "switchyard expert-parallel fp16, 2 GPUs", "threads": "one per GPU", "decode_tok_per_s": {"2": 28.896194096590698, "8": 112.40202045952704, "32": 452.47448097502365, "64": 823.0399485173268}, "peak_GiB_per_gpu": [7.64145565032959, 7.4585723876953125], "threaded_equals_single_thread": true, "tokens_identical_before_first_difference": [32, 32, 32, 16, 32, 32, 32, 32], "of": 32, "identical_outputs": 7, "prompts": 8, "first_token_logit_max_abs_diff": 0.27734375, "first_token_same_argmax": "8/8"}
+{"sample": "The capital of France is Paris.\n\nThe capital of the United States is Washington, D.C.\n\nThe capital of the United Kingdom is London.\n\nThe capital"}
+== diagnostic: each GPU driven by its own thread (CUDA_LAUNCH_BLOCKING=1)
+{"threaded_generate_ok": true, "same_tokens_as_one_thread": true}
+# Earlier run of the same benchmark with one thread driving both GPUs: decode 27 / 88 / 332 / 580 tok/s at batch 2 / 8 / 32 / 64

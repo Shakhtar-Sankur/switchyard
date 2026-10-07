@@ -11,14 +11,25 @@ from .model import Cache, Model
 
 
 class ParallelModel:
-    def __init__(self, path, devices, dtype=torch.float16, ops=None, config=None):
+    def __init__(self, path, devices, dtype=torch.float16, ops=None, config=None, placement=None):
+        """placement: None (rank r holds experts r*E/R .. (r+1)*E/R - 1 of every layer), or per
+        layer a permutation of the experts, rank r holding placement[i][r*E/R:(r+1)*E/R] of
+        layer i. The router's rows are permuted the same way, so the model computes the same
+        function (up to the order in which a token's k expert outputs are added)."""
         self.c = config or Config.load(path)
         self.devices = [torch.device(d) for d in devices]
         R = len(self.devices)
         per = self.c.experts // R
+        self.placement = placement
         self.models = []
         for r, dev in enumerate(self.devices):
-            w = weights_lib.load(path, self.c, dtype=dtype, device=dev, experts=range(r * per, (r + 1) * per))
+            if placement is None:
+                w = weights_lib.load(path, self.c, dtype=dtype, device=dev, experts=range(r * per, (r + 1) * per))
+            else:
+                w = weights_lib.load(path, self.c, dtype=dtype, device=dev,
+                                     experts_per_layer=[p[r * per:(r + 1) * per] for p in placement])
+                for L, p in zip(w["layers"], placement):
+                    L["router"] = L["router"][torch.tensor(p, device=dev)].contiguous()
             self.models.append(Model(self.c, w))
         self.ep = ExpertParallel(self.devices, self.c.experts, self.c.top_k, self.c.norm_topk_prob, ops)
         self.threaded = True  # each GPU driven by its own thread (False: one thread drives all)

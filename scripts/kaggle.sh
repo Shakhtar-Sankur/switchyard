@@ -1,8 +1,8 @@
 #!/bin/bash
 # switchyard on Kaggle (Settings: Accelerator "GPU T4 x2", Internet on). Paste everything from
 # "== switchyard" to "== done" back into the chat.
-#   RUN=all (default): kernels, expert parallelism and OLMoE-1B-7B serving (~25 minutes)
-#   RUN=kernels | ep | serve: one part
+#   RUN=all (default): kernels, expert parallelism, OLMoE-1B-7B serving and load balance (~35 minutes)
+#   RUN=kernels | ep | serve | balance: one part
 set -e
 RUN=${RUN:-all}
 cd /kaggle/working 2>/dev/null || cd /tmp
@@ -28,16 +28,20 @@ if [ "$RUN" = all ] || [ "$RUN" = ep ]; then
   echo "== benchmark: same, NCCL all_to_all as the transport"
   python bench/ep_nccl.py 2>&1 | grep '^{\|Error' || true
 fi
-if [ "$RUN" = all ] || [ "$RUN" = serve ]; then
-  echo "== OLMoE-1B-7B on two T4s"
-  python - <<'PY'
+FILTER="Loading\|it/s\]\|CUDAEvent.h\|Download\|Reconstruct\|Fetching\|clean_up_tokenization\|Token indices"
+if [ "$RUN" = all ] || [ "$RUN" = serve ] || [ "$RUN" = balance ]; then
+  python - <<'PY' 2>&1 | grep -v "$FILTER"
 from huggingface_hub import snapshot_download
 snapshot_download("allenai/OLMoE-1B-7B-0924", local_dir="/tmp/olmoe", allow_patterns=["*.json", "*.safetensors", "*.txt"])
-print("downloaded")
+print("downloaded OLMoE-1B-7B")
 PY
-  FILTER="Loading\|it/s\]\|CUDAEvent.h\|Download\|Reconstruct\|Fetching"
+fi
+if [ "$RUN" = all ] || [ "$RUN" = serve ]; then
+  echo "== OLMoE-1B-7B on two T4s"
   SWITCHYARD_THREADED=1 python bench/serve.py /tmp/olmoe 32 2>&1 | grep -v "$FILTER" | tail -12
-  echo "== diagnostic: each GPU driven by its own thread (CUDA_LAUNCH_BLOCKING=1)"
-  CUDA_LAUNCH_BLOCKING=1 python bench/threads_check.py /tmp/olmoe 2>&1 | grep -v "$FILTER" | tail -40
+fi
+if [ "$RUN" = all ] || [ "$RUN" = balance ]; then
+  echo "== load balance on WikiText-2 (OLMoE-1B-7B, two T4s)"
+  python bench/balance.py /tmp/olmoe 2>&1 | grep -v "$FILTER" | tail -12
 fi
 echo "== done"

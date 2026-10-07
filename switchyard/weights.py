@@ -33,9 +33,10 @@ class Checkpoint:
         return name in self.where
 
 
-def load(path, config, dtype=torch.float32, device="cpu", experts=None):
+def load(path, config, dtype=torch.float32, device="cpu", experts=None, experts_per_layer=None):
     """Returns {"embed", "final_norm", "lm_head", "layers": [dict per layer]}, with the
-    experts in `experts` (default: all) stacked in that order."""
+    experts in `experts` (default: all) stacked in that order, or for layer i those in
+    experts_per_layer[i]."""
     ck = Checkpoint(path)
     experts = list(range(config.experts)) if experts is None else list(experts)
 
@@ -59,8 +60,9 @@ def load(path, config, dtype=torch.float32, device="cpu", experts=None):
             "router": t(p + "mlp.gate.weight"),
         }
         e = p + "mlp.experts."
-        L["gate_up"] = torch.stack([torch.cat([t(f"{e}{j}.gate_proj.weight"), t(f"{e}{j}.up_proj.weight")]) for j in experts])
-        L["down"] = torch.stack([t(f"{e}{j}.down_proj.weight") for j in experts])
+        mine = list(experts_per_layer[i]) if experts_per_layer is not None else experts
+        L["gate_up"] = torch.stack([torch.cat([t(f"{e}{j}.gate_proj.weight"), t(f"{e}{j}.up_proj.weight")]) for j in mine])
+        L["down"] = torch.stack([t(f"{e}{j}.down_proj.weight") for j in mine])
         layers.append(L)
     out["layers"] = layers
     out["experts"] = experts
