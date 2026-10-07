@@ -57,15 +57,18 @@ def hf_run(path, tok, new):
 
 
 def ours_run(path, tok, new):
+    import traceback
     from switchyard.serve import ParallelModel
     pm = ParallelModel(path, ["cuda:0", "cuda:1"], dtype=torch.float16)
     ids = [tok(p).input_ids for p in PROMPTS]
+    threaded = os.environ.get("SWITCHYARD_THREADED", "0") == "1"
+    pm.threaded = threaded
     out = pm.generate(ids, new)
     firsts = []
     same_threading = True
     for i in range(0, len(ids), 2):  # two prompts at a time, one on each GPU
         toks = [torch.tensor([ids[i]], device="cuda:0"), torch.tensor([ids[i + 1]], device="cuda:1")]
-        logits = pm.forward(toks)
+        logits = pm.forward(toks, threaded=threaded)
         one = pm.forward(toks, threaded=False)  # the same pass driven from one thread
         same_threading &= all(torch.equal(a, b) for a, b in zip(logits, one))
         firsts += [logits[0][0, -1].float().cpu(), logits[1][0, -1].float().cpu()]
@@ -98,7 +101,8 @@ def main(path, new=32):
         while n < min(len(a), len(b)) and a[n] == b[n]:
             n += 1
         agree.append(n)
-    rec = {"engine": "switchyard expert-parallel fp16, 2 GPUs", "decode_tok_per_s": our_speed,
+    rec = {"engine": "switchyard expert-parallel fp16, 2 GPUs", "threads": "one per GPU" if os.environ.get("SWITCHYARD_THREADED") == "1" else "one",
+           "decode_tok_per_s": our_speed,
            "peak_GiB_per_gpu": mem, "threaded_equals_single_thread": same_threading, "tokens_identical_before_first_difference": agree, "of": new,
            "identical_outputs": sum(a == b for a, b in zip(hf_out, our_out)), "prompts": len(PROMPTS)}
     if our_first:

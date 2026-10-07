@@ -272,11 +272,15 @@ class ExpertParallel:
                 self.barrier.abort()
                 raise
 
-        try:
-            return list(self._pool.map(guarded, range(self.R)))
-        finally:
-            if self.barrier.broken:
-                self.barrier.reset()
+        futures = [self._pool.submit(guarded, r) for r in range(self.R)]
+        errors = [f.exception() for f in futures]  # waits for every rank
+        if self.barrier.broken:
+            self.barrier.reset()
+        # raise the rank that failed first, not the others' BrokenBarrierError
+        real = [e for e in errors if e is not None and not isinstance(e, threading.BrokenBarrierError)]
+        if real or any(errors):
+            raise (real or [e for e in errors if e is not None])[0]
+        return [f.result() for f in futures]
 
     def layer_threaded(self, hs, routers, gate_ups, downs):
         """Same as layer(), every rank driven by its own thread."""

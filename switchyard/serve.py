@@ -21,16 +21,17 @@ class ParallelModel:
             w = weights_lib.load(path, self.c, dtype=dtype, device=dev, experts=range(r * per, (r + 1) * per))
             self.models.append(Model(self.c, w))
         self.ep = ExpertParallel(self.devices, self.c.experts, self.c.top_k, self.c.norm_topk_prob, ops)
+        self.threaded = True  # each GPU driven by its own thread (False: one thread drives all)
 
     @torch.no_grad()
-    def forward(self, tokens, caches=None, valids=None, threaded=True):
+    def forward(self, tokens, caches=None, valids=None, threaded=None):
         """tokens[r]: [B_r, T_r] for rank r. Returns logits per rank. Each GPU runs its whole
         forward pass in its own thread (attention for its own requests), meeting the others at
         every MoE layer."""
         R = len(self.models)
         caches = caches or [None] * R
         valids = valids or [None] * R
-        if not threaded:
+        if not (self.threaded if threaded is None else threaded):
             return self._forward_one_thread(tokens, caches, valids)
         states = [self.ep.new_state() for _ in range(self.c.layers)]
 

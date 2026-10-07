@@ -35,6 +35,9 @@ from huggingface_hub import snapshot_download
 snapshot_download("allenai/OLMoE-1B-7B-0924", local_dir="/tmp/olmoe", allow_patterns=["*.json", "*.safetensors", "*.txt"])
 print("downloaded")
 PY
-  python bench/serve.py /tmp/olmoe 32 2>&1 | grep -v "Loading\|it/s\]\|CUDAEvent.h\|Download\|Reconstruct\|Fetching" | tail -40
+  FILTER="Loading\|it/s\]\|CUDAEvent.h\|Download\|Reconstruct\|Fetching"
+  python bench/serve.py /tmp/olmoe 32 2>&1 | grep -v "$FILTER" | tail -12
+  echo "== diagnostic: each GPU driven by its own thread (CUDA_LAUNCH_BLOCKING=1)"
+  CUDA_LAUNCH_BLOCKING=1 python bench/threads_check.py /tmp/olmoe 2>&1 | grep -v "$FILTER" | tail -40
 fi
 echo "== done"
