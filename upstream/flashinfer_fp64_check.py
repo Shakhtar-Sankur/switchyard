@@ -95,7 +95,8 @@ def recording_ref_with_inputs(**kw):
 
 T.ref_paged_attn = recording_ref_with_inputs
 
-CASES = [(None, None, 32, 128), (None, None, 16, 128), (64, None, 32, 128), (None, None, 32, 256)]
+CASES = [(None, None, 32, 128), (None, None, 16, 128), (64, None, 32, 128), (None, 30.0, 32, 128),
+         (None, None, 32, 256), (64, 30.0, 32, 256)]
 for sliding_window, soft_cap, block_size, head_size in CASES:
     captured.clear()
     T.test_flashinfer_prefill_with_paged_kv(
@@ -103,14 +104,15 @@ for sliding_window, soft_cap, block_size, head_size in CASES:
         dtype=torch.float16, block_size=block_size, soft_cap=soft_cap, sliding_window=sliding_window)
     t = captured["f64"]
     out, ref = captured["out"].double(), captured["ref"].double()
-    sd = sdpa_fp16(**inputs).double()
+    sd = sdpa_fp16(**inputs).double() if soft_cap is None else None  # SDPA has no soft cap
     worst = torch.argmax(torch.abs(out - t))
     print(json.dumps({
-        "case": f"window={sliding_window} page={block_size} head={head_size}",
+        "case": f"window={sliding_window} soft_cap={soft_cap} page={block_size} head={head_size}",
         "max_abs_output": round(float(torch.abs(t).max()), 3),
         "flashinfer_err_per_sequence": per_sequence(torch.abs(out - t)),
         "fp16_reference_err_per_sequence": per_sequence(torch.abs(ref - t)),
-        "torch_sdpa_fp16_err_per_sequence": per_sequence(torch.abs(sd - t)),
+        "torch_sdpa_fp16_err_per_sequence": per_sequence(torch.abs(sd - t)) if sd is not None else None,
+        "flashinfer_vs_fp16_reference_max": round(float(torch.max(torch.abs(out - ref))), 5),
         "flashinfer_worst_element": [int(x) for x in torch.unravel_index(worst, out.shape)],
         "true_value_there": round(float(t.flatten()[worst]), 4),
         "flashinfer_value_there": round(float(out.flatten()[worst]), 4)}), flush=True)
