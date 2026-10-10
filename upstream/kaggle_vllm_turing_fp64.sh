@@ -1,8 +1,8 @@
 #!/bin/bash
 # Second follow-up: compares FlashInfer and the test's float16 reference against a float64 reference,
-# then replays the prefill tests and the whole file to see whether the head-256 failures recur.
+# three times in one process, to see whether the head-256 results change from run to run.
 #   !cd /tmp && rm -rf sy && git clone -q --depth 1 https://github.com/Shakhtar-Sankur/switchyard sy && bash sy/upstream/kaggle_vllm_turing_fp64.sh
-# About 20 minutes.
+# About 10 minutes.
 set -o pipefail
 SY=$(cd "$(dirname "$0")" && pwd)
 VLLM_SHA=193922d6ff5f7e213eacadd3cb7dd96612b30ed3
@@ -39,10 +39,5 @@ if old in s:
 print("float16 below SM80")
 PATCH
 echo "== 1. FlashInfer and the test's float16 reference, each against float64"
-python $SY/flashinfer_fp64_check.py 2>&1 | grep -E '^\{|Error|error' | head -12
-P="-q -rf --tb=no -p no:cacheprovider --noconftest -p kernels_fixture"
-echo "== 2. all prefill tests in one process"
-python -m pytest $P "$T" -k "test_flashinfer_prefill_with_paged_kv and not fp8" 2>&1 | grep -E "^FAILED|passed|failed" | tail -12
-echo "== 3. the whole file again, as in the first run"
-python -m pytest $P "$T" -k "not num_heads2" 2>&1 | grep -E "^FAILED|passed|failed" | tail -12
+python $SY/flashinfer_fp64_check.py 2>&1 | grep -E '^\{|Error|error' | head -30
 echo "== done: copy from '== vLLM FlashInfer T4 float64 check' to here and send it back"
