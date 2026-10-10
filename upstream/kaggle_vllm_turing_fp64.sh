@@ -1,6 +1,6 @@
 #!/bin/bash
 # Second follow-up: compares FlashInfer and the test's float16 reference against a float64 reference,
-# three times in one process, to see whether the head-256 results change from run to run.
+# broken down by sequence, next to PyTorch's own float16 attention (scaled_dot_product_attention).
 #   !cd /tmp && rm -rf sy && git clone -q --depth 1 https://github.com/Shakhtar-Sankur/switchyard sy && bash sy/upstream/kaggle_vllm_turing_fp64.sh
 # About 10 minutes.
 set -o pipefail
