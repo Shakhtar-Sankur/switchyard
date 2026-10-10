@@ -1,4 +1,4 @@
-From a4f0ff94347b55d842f8aaedcf9b382cba5c089d Mon Sep 17 00:00:00 2001
+From 23c71704cf17f3a2a46a2f57e19665f69f246f52 Mon Sep 17 00:00:00 2001
 From: Sankur Kundu <sankur.kundu.tw@gmail.com>
 Date: Sat, 10 Oct 2026 03:54:27 +0000
 Subject: [PATCH] [Bugfix][Test] Run the FlashInfer prefill tests causally,
@@ -21,14 +21,14 @@ Signed-off-by: Sankur Kundu <sankur.kundu.tw@gmail.com>
  1 file changed, 3 insertions(+), 1 deletion(-)
 
 diff --git a/tests/kernels/attention/test_flashinfer.py b/tests/kernels/attention/test_flashinfer.py
-index c56af3a..1e683bb 100644
+index c56af3a..b05b0ae 100644
 --- a/tests/kernels/attention/test_flashinfer.py
 +++ b/tests/kernels/attention/test_flashinfer.py
 @@ -463,6 +463,7 @@ def test_flashinfer_prefill_with_paged_kv(
          num_kv_heads,
          head_size,
          block_size,
-+        causal=True,  # as ref_paged_attn; plan() defaults to non-causal
++        causal=True,
          window_left=sliding_window - 1 if sliding_window is not None else -1,
          q_data_type=dtype,
          kv_data_type=dtype,
@@ -45,7 +45,7 @@ index c56af3a..1e683bb 100644
          num_kv_heads,
          head_size,
          block_size,
-+        causal=True,  # as ref_paged_attn; plan() defaults to non-causal
++        causal=True,
          q_data_type=dtype,
          kv_data_type=kv_cache_dtype,
          logits_soft_cap=soft_cap,

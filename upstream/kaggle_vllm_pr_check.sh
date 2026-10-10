@@ -44,7 +44,7 @@ fp16
 echo "== 1. with the PR: both prefill tests"
 python -m pytest $P "$T" -k "prefill and not num_heads2" 2>&1 | grep -E "^FAILED|passed|failed" | tail -12
 echo "== 2. the PR's tolerance without causal=True: does the test now catch the bug?"
-sed -i '/causal=True,  # as ref_paged_attn; plan() defaults to non-causal/d' $T
+sed -i '/^        causal=True,$/d' $T
 grep -c "causal=True" $T | sed 's/^/causal=True lines left: /'
 python -m pytest $P "$T" -k "test_flashinfer_prefill_with_paged_kv and not fp8 and not num_heads2" 2>&1 | grep -E "passed|failed" | tail -2
 echo "== done: copy from '== vLLM PR check' to here and send it back"
